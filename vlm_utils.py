@@ -8,7 +8,6 @@ import json
 import re
 import ast
 from pathlib import Path
-from typing import List, Optional
 import config
 
 from openai import OpenAI
@@ -36,12 +35,12 @@ def query_vlm(
     client: OpenAI,
     model: str,
     query: str,
-    chat_history: Optional[List[dict]] = None,
-    image_path: Optional[Path] = None,
-    system_prompt: Optional[str] = None,
+    chat_history: list[dict] | None = None,
+    image_path: Path | None = None,
+    system_prompt: str | None = None,
     max_tokens: int = 512,
     temperature: float = 0.3,
-) -> List[dict]:
+) -> list[dict]:
     """
     Send a prompt (optionally with an image) to the VLM and return the
     assistant's text response.
@@ -54,12 +53,12 @@ def query_vlm(
         The model identifier served by LMStudio.
     query : str
         The user-visible text query.
-    chat_history : List[dict], optional
+    chat_history : list[dict] | None, optional
         A list of previous messages in the conversation. Each message should be a dict with "role" and "content" keys.
-    image_path : Path, optional
+    image_path : Path | None, optional
         If provided, the image is base64-encoded and sent as part of the
         multimodal message.
-    system_prompt : str, optional
+    system_prompt : str | None, optional
         Optional system message prepended to the conversation.
     max_tokens : int
         Maximum number of tokens for the response.
@@ -68,7 +67,7 @@ def query_vlm(
 
     Returns
     -------
-    List[dict]
+    list[dict]
         A list of messages in the conversation, including the user's query and the model's response.
     """
     if chat_history is None:
