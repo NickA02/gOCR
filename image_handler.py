@@ -121,7 +121,7 @@ def _run_yolo(image: Image.Image) -> list[tuple[int, int, int, int]]:
     """
     model = _get_yolo_predictor()
     # conf=0.01 is effectively "no threshold" while still producing valid results
-    results = model(image, conf=0.01, verbose=False)
+    results = model(image, conf=0.4, verbose=False)
 
     bboxes: list[tuple[int, int, int, int]] = []
     for result in results:
