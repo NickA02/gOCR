@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import config
-#from markdown_processor import process_markdown
+from markdown_processor import process_markdown
 from vlm_utils import get_client
 
 
@@ -41,6 +41,10 @@ def run_marker(pdf_path: Path, marker_out_dir: Path) -> Path:
         "marker_single",
         str(pdf_path),
         "--output_dir", str(marker_out_dir),
+        "--use_llm",
+        "--llm_service",
+        "--ollama_base_url", config.API_ROOT,
+        "--ollama_model", config.VLM_MODEL
     ]
 
     print(f"Running marker_single on '{pdf_path.name}'…")
@@ -103,14 +107,14 @@ def run_pipeline(
         #Verify that the pipeline runs without refinement
 
         # ── Step 2: Post-process ──────────────────────────────────────────────
-        # print("Post-processing Marker output…")
-        # final_markdown, review_flags = process_markdown(
-        #     raw_markdown=raw_markdown,
-        #     marker_output_dir=marker_page_dir,
-        #     temp_dir=temp_dir,
-        #     client=client,
-        #     model=model,
-        # )
+        print("Post-processing Marker output…")
+        final_markdown, review_flags = process_markdown(
+            raw_markdown=raw_markdown,
+            marker_output_dir=marker_page_dir,
+            temp_dir=temp_dir,
+            client=client,
+            model=model,
+        )
         final_markdown = raw_markdown
         review_flags = []
 
