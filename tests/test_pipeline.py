@@ -8,7 +8,8 @@ Test groups:
   TestConfig          — config values are sane
   TestVLMUtils        — VLM client + encoding (no live call)
   TestMarkdownParser  — image reference detection in markdown
-  TestImageHandler    — Surya model loading + table detection on sample image
+  TestImageHandler    — YOLO model loading + table detection on sample image
+  TestFigureParser    — process_image and image_result_to_markdown
   TestMarkerStep      — marker_single subprocess produces a .md file
   TestFullPipeline    — end-to-end run with post_process flag (skipped if disabled)
 
@@ -39,8 +40,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import config
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-SAMPLE_PDF   = Path(__file__).parent.parent / "sample.pdf"
-SAMPLE_IMAGE = Path(__file__).parent.parent / "_page_2_Figure_0.jpeg"
+SAMPLE_PDF    = Path(__file__).parent.parent / "sample.pdf"
+SAMPLE_FIGURE = Path(__file__).parent.parent / "_page_2_Figure_0.jpeg"
 
 # ── Pytest marks ──────────────────────────────────────────────────────────────
 slow   = pytest.mark.slow
@@ -183,6 +184,205 @@ class TestMarkdownParser:
 # TestImageHandler
 # ══════════════════════════════════════════════════════════════════════════════
 
+class TestImageHandler:
+    """YOLO model loading, table detection, and cropping."""
+
+    @slow
+    def test_yolo_predictor_loads(self):
+        from image_handler import _get_yolo_predictor
+        pred = _get_yolo_predictor()
+        assert pred is not None
+
+    @slow
+    def test_detect_tables_returns_list(self):
+        from image_handler import detect_tables
+        result = detect_tables(Image.new("RGB", (100, 100)))
+        assert isinstance(result, list)
+
+    @slow
+    @pytest.mark.skipif(not SAMPLE_FIGURE.exists(), reason="Sample figure not found")
+    def test_detect_tables_on_sample_figure_finds_multiple(self):
+        from image_handler import detect_tables
+        img = Image.open(SAMPLE_FIGURE).convert("RGB")
+        bboxes = detect_tables(img)
+        assert len(bboxes) > 1, \
+            f"Expected multiple tables in sample figure, got {len(bboxes)}"
+
+    @slow
+    @pytest.mark.skipif(not SAMPLE_FIGURE.exists(), reason="Sample figure not found")
+    def test_detected_bboxes_within_image_bounds(self):
+        from image_handler import detect_tables
+        img = Image.open(SAMPLE_FIGURE).convert("RGB")
+        w, h = img.size
+        for x1, y1, x2, y2 in detect_tables(img):
+            assert 0 <= x1 < x2 <= w, f"Invalid x range: {x1}, {x2}"
+            assert 0 <= y1 < y2 <= h, f"Invalid y range: {y1}, {y2}"
+
+    def test_crop_table_respects_image_bounds(self):
+        from image_handler import crop_table
+        img = Image.new("RGB", (200, 200), color=(128, 128, 128))
+        crop = crop_table(img, (0, 0, 50, 50), padding=30)
+        w, h = crop.size
+        assert 0 < w <= 200 and 0 < h <= 200
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestFigureParser
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestFigureParser:
+    """
+    Tests for process_image and image_result_to_markdown.
+
+    Fast tests use unittest.mock to patch detect_tables and _vlm_summarize —
+    no YOLO models or live VLM required.
+
+    Slow tests run against the real sample figure with a dead VLM URL to
+    verify that table detection still succeeds when the LLM is unavailable.
+    """
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _make_image_result(self, tables=None, summary="Figure summary.", flags=None):
+        from image_handler import ImageResult
+        return ImageResult(
+            image_path=Path("test.jpeg"),
+            figure_summary=summary,
+            tables=tables or [],
+            rotation_degrees=0,
+            flags=flags or [],
+        )
+
+    def _make_table_result(self, idx=0, ocr_text="Table data.", confidence="high", flags=None):
+        from image_handler import TableResult
+        return TableResult(
+            table_index=idx,
+            bbox=(10, 10, 100, 100),
+            ocr_text=ocr_text,
+            confidence=confidence,
+            flags=flags or [],
+        )
+
+    # ── image_result_to_markdown ──────────────────────────────────────────────
+
+    def test_markdown_no_tables_contains_summary(self):
+        from image_handler import image_result_to_markdown
+        result = self._make_image_result(summary="A site map.")
+        md = image_result_to_markdown(result)
+        assert "A site map." in md
+        assert "0 table(s)" in md
+
+    def test_markdown_with_tables_lists_all(self):
+        from image_handler import image_result_to_markdown
+        tables = [self._make_table_result(i, f"Data for table {i}.") for i in range(3)]
+        result = self._make_image_result(tables=tables)
+        md = image_result_to_markdown(result)
+        assert "3 table(s)" in md
+        for i in range(3):
+            assert f"Data for table {i}." in md
+
+    def test_markdown_with_image_flags_shows_warnings(self):
+        from image_handler import image_result_to_markdown
+        result = self._make_image_result(flags=["No tables detected — manual review recommended."])
+        md = image_result_to_markdown(result)
+        assert "No tables detected" in md
+
+    def test_markdown_vlm_crash_shows_placeholder(self):
+        from image_handler import image_result_to_markdown
+        result = self._make_image_result(
+            summary="(VLM unavailable)",
+            flags=["Figure summary error: connection refused"],
+        )
+        md = image_result_to_markdown(result)
+        assert "(VLM unavailable)" in md
+        assert "Figure summary error" in md
+
+    # ── process_image with mocked internals (no models needed) ────────────────
+
+    def test_process_image_mocked_vlm_returns_all_tables(self, tmp_path):
+        from unittest.mock import patch
+        from image_handler import process_image
+        from openai import OpenAI
+
+        img = Image.new("RGB", (400, 300), color=(200, 200, 200))
+        img_path = tmp_path / "fig.png"
+        img.save(str(img_path))
+
+        fake_bboxes = [(10, 10, 190, 140), (210, 10, 390, 140), (10, 160, 390, 290)]
+
+        with patch("image_handler._detect_tables_with_rotation",
+                   return_value=(fake_bboxes, 0)), \
+             patch("image_handler._vlm_summarize", return_value="Mock summary."):
+            result = process_image(img_path, tmp_path, OpenAI(api_key="x"), "mock")
+
+        assert len(result.tables) == 3
+        assert result.figure_summary == "Mock summary."
+        assert result.rotation_degrees == 0
+        for t in result.tables:
+            assert t.confidence == "high"
+
+    def test_process_image_vlm_crash_still_returns_tables(self, tmp_path):
+        from unittest.mock import patch
+        from image_handler import process_image
+        from openai import OpenAI
+
+        img = Image.new("RGB", (400, 300), color=(200, 200, 200))
+        img_path = tmp_path / "fig.png"
+        img.save(str(img_path))
+
+        fake_bboxes = [(10, 10, 190, 140), (210, 10, 390, 140)]
+
+        with patch("image_handler._detect_tables_with_rotation",
+                   return_value=(fake_bboxes, 0)), \
+             patch("image_handler._vlm_summarize",
+                   side_effect=RuntimeError("LLM crashed")):
+            result = process_image(img_path, tmp_path, OpenAI(api_key="x"), "mock")
+
+        assert len(result.tables) == 2
+        assert result.figure_summary == "(VLM unavailable)"
+        assert any("Figure summary error" in f for f in result.flags)
+        # Tables are still returned with high confidence — VLM crash only
+        # affects the figure summary, not OCR
+        for t in result.tables:
+            assert t.confidence == "high"
+
+    def test_process_image_no_tables_detected(self, tmp_path):
+        from unittest.mock import patch
+        from image_handler import process_image
+        from openai import OpenAI
+
+        img = Image.new("RGB", (200, 200), color=(255, 255, 255))
+        img_path = tmp_path / "blank.png"
+        img.save(str(img_path))
+
+        with patch("image_handler._detect_tables_with_rotation",
+                   return_value=([], 0)), \
+             patch("image_handler._vlm_summarize", return_value="A blank figure."):
+            result = process_image(img_path, tmp_path, OpenAI(api_key="x"), "mock")
+
+        assert result.tables == []
+        assert result.figure_summary == "A blank figure."
+        assert any("No tables detected" in f for f in result.flags)
+
+    # ── slow: real YOLO + dead VLM (tests LLM-crash resilience end-to-end) ───
+
+    @slow
+    @pytest.mark.skipif(not SAMPLE_FIGURE.exists(), reason="Sample figure not found")
+    def test_process_image_dead_vlm_returns_tables(self, tmp_path):
+        """YOLO finds tables; dead VLM should not prevent them being returned."""
+        from image_handler import process_image
+        from openai import OpenAI
+
+        dead_client = OpenAI(base_url="http://localhost:9999/v1", api_key="dummy")
+        result = process_image(SAMPLE_FIGURE, tmp_path, dead_client, "none")
+
+        assert result is not None
+        assert len(result.tables) > 0, \
+            "Should still return detected tables even when VLM is unavailable"
+        assert result.figure_summary == "(VLM unavailable)"
+        # VLM crash only affects figure_summary; table OCR confidence is independent
+        for t in result.tables:
+            assert t.confidence in ("high", "low")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TestMarkerStep
@@ -246,11 +446,8 @@ class TestMarkerStep:
                 f"Marker referenced image not found on disk: {img_path}"
 
 
-
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# TestFullPipeline  (skipped until post-processing is re-enabled)
+# TestFullPipeline
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestFullPipeline:
@@ -261,7 +458,6 @@ class TestFullPipeline:
     """
 
     @slow
-    @pytest.mark.skip(reason="Post-processing disabled — re-enable when ready")
     def test_full_pipeline_produces_output_file(self, marker_output, tmp_path):
         from markdown_processor import process_markdown
         _, get_client = _import_vlm()
@@ -278,7 +474,6 @@ class TestFullPipeline:
 
 
     @slow
-    @pytest.mark.skip(reason="Post-processing disabled — re-enable when ready")
     def test_full_pipeline_no_raw_image_refs_in_output(self, marker_output, tmp_path):
         _IMAGE_REF_RE, _ = _import_markdown()
         from markdown_processor import process_markdown
@@ -295,7 +490,6 @@ class TestFullPipeline:
             f"Found {len(raw_refs)} unprocessed image reference(s) in final output"
 
     @slow
-    @pytest.mark.skip(reason="Post-processing disabled — re-enable when ready")
     def test_full_pipeline_header_present(self, marker_output, tmp_path):
         from markdown_processor import process_markdown
         _, get_client = _import_vlm()

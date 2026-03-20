@@ -18,6 +18,8 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from image_handler import ImageResult, image_result_to_markdown, process_image
+
 
 # ── Image reference pattern ───────────────────────────────────────────────────
 # Matches Marker's figure references, e.g.: ![](_page_2_Figure_0.jpeg)
@@ -110,14 +112,34 @@ def process_markdown(
 
     # ── Process each segment ──────────────────────────────────────────────────
     output_parts: list[str] = []
-    image_results: list = []
+    image_results: list[ImageResult] = []
 
     for kind, content in segments:
         if kind == "text":
             output_parts.append(content)
         else:
-            pass # not implementing this yet
+            image_path: Path = content
+            print(f"  Processing image: {image_path.name}")
+            result = process_image(
+                image_path=image_path,
+                temp_dir=temp_dir,
+                client=client,
+                model=model,
+            )
+            image_results.append(result)
 
+            # Collect flags for low-confidence tables
+            for table in result.tables:
+                if table.confidence != "high":
+                    review_flags.append(
+                        f"Image '{image_path.name}', table {table.table_index + 1} "
+                        f"({table.confidence} confidence): "
+                        + "; ".join(table.flags)
+                    )
+            for flag in result.flags:
+                review_flags.append(f"Image '{image_path.name}': {flag}")
+
+            output_parts.append(image_result_to_markdown(result))
 
     # ── Assemble final document ───────────────────────────────────────────────
     body = "\n\n---\n\n".join(p for p in output_parts if p.strip())

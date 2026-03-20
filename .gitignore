@@ -211,3 +211,5 @@ config.py
 
 *.pdf
 .DS_Store
+models/*
+output/*
