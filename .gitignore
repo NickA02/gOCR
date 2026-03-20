@@ -208,3 +208,6 @@ __marimo__/
 
 # Keystore
 config.py
+
+*.pdf
+.DS_Store
